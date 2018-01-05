@@ -37,28 +37,26 @@ contract BETR_TOKEN {
     string public symbol = "BETR";
     uint256 public constant decimals = 18;
 
-    uint256 public hardCap; // total supply => hard cap
-    uint256 public totalSupply; // adpative supply => current cap
-    uint256 public fee; // collected fee counter
+    uint256 public hardCap = 650000000 * (10 ** decimals);
+    uint256 public totalSupply;
 
-    address public service; // reference to service contract for transaction and authorization
+    address public escrow; // reference to escrow contract for transaction and authorization
     address public owner; // reference to the contract creator
-    address public mobs; // reference to the third party ico backoffice provider
+    address public tgeIssuer = 0xba81ACCC7074B5D9ABDAa25c30DbaD96BF44D660;
 
-    bool public icoActive;
-    uint256 public icoDuration = 30 days;
-    uint256 public icoStartTime;
+    bool public tgeActive;
+    uint256 public tgeDuration = 30 days;
+    uint256 public tgeStartTime;
 
     mapping (address => uint256) balances;
     mapping (address => mapping (address => uint256)) allowed; // third party authorisations for token transfering
+    mapping (address => bool) public escrowAllowed; // per address switch authorizing the escrow to escrow user tokens
 
     event Transfer(address indexed _from, address indexed _to, uint256 _value);
     event Approval(address indexed _owner, address indexed _spender, uint256 _value);
 
-    function BETR_TOKEN(uint256 _hardCap, address _mobs) public {
-        hardCap = _hardCap * (10 ** decimals);
+    function BETR_TOKEN() public {
         owner = msg.sender;
-        mobs = _mobs;
     }
 
     modifier onlyOwner {
@@ -66,18 +64,18 @@ contract BETR_TOKEN {
         _;
     }
 
-    modifier onlyMobs {
-        require(msg.sender == mobs);
+    modifier onlyTgeIssuer {
+        require(msg.sender == tgeIssuer);
         _;
     }
 
-    modifier onlyService {
-        require(msg.sender == service);
+    modifier onlyEscrow {
+        require(msg.sender == escrow);
         _;
     }
 
-    modifier icoRunning {
-        require(icoActive && block.timestamp < icoStartTime + icoDuration);
+    modifier tgeRunning {
+        require(tgeActive && block.timestamp < tgeStartTime + tgeDuration);
         _;
     }
 
@@ -90,19 +88,6 @@ contract BETR_TOKEN {
         balances[msg.sender] = balances[msg.sender].sub(_value);
         balances[_to] = balances[_to].add(_value);
         Transfer(msg.sender, _to, _value);
-        return true;
-    }
-
-    function reward(address _to, uint256 _value, uint256 _fee) external onlyService returns(bool) {
-        require(
-            _to != address(0) &&
-            _value > 0
-        );
-        if(_fee > 0) {
-            totalSupply = totalSupply.sub(_fee);
-            fee = fee.add(_fee);
-        }
-        require(transfer(_to, _value));
         return true;
     }
 
@@ -128,87 +113,99 @@ contract BETR_TOKEN {
         return true;
     }
 
-    function takeBet(uint256 _id, uint256 _value) external returns (bool success) {
+    function allowEscrow(bool _choice) external returns(bool) {
+      escrowAllowed[msg.sender] = _choice;
+      return true;
+    }
+
+    function escrowFrom(address _from, uint256 _value) external onlyEscrow returns(bool) {
+      require (
+        _from != address(0) &&
+        balances[_from] >= _value &&
+        escrowAllowed[_from] &&
+        _value > 0
+      );
+      balances[_from] = balances[_from].sub(_value);
+      balances[escrow] = balances[escrow].add(_value);
+      Transfer(_from, escrow, _value);
+      return true;
+    }
+
+    function escrowReturn(address _to, uint256 _value, uint256 _fee) external onlyEscrow returns(bool) {
         require(
-          _value > 0 &&
-          transfer(service, _value) &&
-          service.call(bytes4(bytes32(keccak256("betHandler(uint256,address,uint256)"))), _id, msg.sender, _value)
+            _to != address(0) &&
+            _value > 0
         );
+        if(_fee > 0) {
+            require(_fee < totalSupply && _fee < balances[escrow]);
+            totalSupply = totalSupply.sub(_fee);
+            balances[escrow] = balances[escrow].sub(_fee);
+        }
+        require(transfer(_to, _value));
         return true;
     }
 
-    function mint(address _investor, uint256 _tokensAmount) public onlyMobs icoRunning returns(bool) {
+    function mint(address _user, uint256 _tokensAmount) public onlyTgeIssuer tgeRunning returns(bool) {
         uint256 newSupply = totalSupply.add(_tokensAmount);
         require(
-            _investor != address(0) &&
+            _user != address(0) &&
             _tokensAmount > 0 &&
              newSupply < hardCap
         );
-        balances[_investor] = balances[_investor].add(_tokensAmount);
+        balances[_user] = balances[_user].add(_tokensAmount);
         totalSupply = newSupply;
-        Transfer(0x0, _investor, newSupply);
+        Transfer(0x0, _user, _tokensAmount);
         return true;
     }
 
-    function reserveTokensGroup(address[] _investors, uint256[] _tokensAmounts) external onlyOwner {
-        require(_investors.length == _tokensAmounts.length);
+    function reserveTokensGroup(address[] _users, uint256[] _tokensAmounts) external onlyOwner {
+        require(_users.length == _tokensAmounts.length);
         uint256 newSupply;
-        for(uint8 i = 0; i < _investors.length; i++){
+        for(uint8 i = 0; i < _users.length; i++){
             newSupply = totalSupply.add(_tokensAmounts[i].mul(10 ** decimals));
             require(
-                _investors[i] != address(0) &&
+                _users[i] != address(0) &&
                 _tokensAmounts[i] > 0 &&
                 newSupply < hardCap
             );
-            balances[_investors[i]] = balances[_investors[i]].add(_tokensAmounts[i].mul(10 ** decimals));
+            balances[_users[i]] = balances[_users[i]].add(_tokensAmounts[i].mul(10 ** decimals));
             totalSupply = newSupply;
-            Transfer(0x0, _investors[i], newSupply);
+            Transfer(0x0, _users[i], _tokensAmounts[i]);
         }
     }
 
-    function reserveTokens(address _investor, uint256 _tokensAmount) external onlyOwner {
+    function reserveTokens(address _user, uint256 _tokensAmount) external onlyOwner {
         uint256 newSupply = totalSupply.add(_tokensAmount.mul(10 ** decimals));
         require(
-            _investor != address(0) &&
+            _user != address(0) &&
             _tokensAmount > 0 &&
             newSupply < hardCap
         );
-        balances[_investor] = balances[_investor].add(_tokensAmount.mul(10 ** decimals));
+        balances[_user] = balances[_user].add(_tokensAmount.mul(10 ** decimals));
         totalSupply = newSupply;
-        Transfer(0x0, _investor, newSupply);
+        Transfer(0x0, _user, _tokensAmount);
     }
 
-    function collectFee() external onlyOwner {
-      require(fee > 0);
-      balances[owner] = balances[owner].add(fee);
-      totalSupply = totalSupply.add(fee);
-      fee = 0;
-      Transfer(0x0, owner, hardCap);
+    function startTge() external onlyOwner {
+        tgeActive = true;
+        if(tgeStartTime == 0) tgeStartTime = block.timestamp;
     }
 
-    function startIco() external onlyOwner {
-        icoActive = true;
-        if(icoStartTime == 0) icoStartTime = block.timestamp;
+    function stopTge(bool _restart) external onlyOwner {
+      tgeActive = false;
+      if(_restart) tgeStartTime = 0;
     }
 
-    function stopIco() external onlyOwner {
-        icoActive = false;
+    function extendTge(uint256 _time) external onlyOwner {
+      tgeDuration = tgeDuration.add(_time);
     }
 
-    function inflate(uint256 _value) external onlyOwner {
-        hardCap = hardCap.add(_value);
+    function setEscrow(address _escrow) external onlyOwner {
+        escrow = _escrow;
     }
 
-    function deflate(uint256 _value) external onlyOwner {
-        hardCap = hardCap.sub(_value);
-    }
-
-    function setService(address _service) external onlyOwner {
-        service = _service;
-    }
-
-    function setMobs(address _mobs) external onlyOwner {
-        mobs = _mobs;
+    function setTgeIssuer(address _tgeIssuer) external onlyOwner {
+        tgeIssuer = _tgeIssuer;
     }
 
     function balanceOf(address _owner) external view returns (uint256) {
